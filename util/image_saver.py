@@ -103,15 +103,18 @@ def out_transform(mask, size):
 
 def scribble_transform(mask, scribble, size):
     mask = mask.repeat(3, 1, 1).cpu()
-    scribble = scribble.cpu()
-    mask[:, scribble[0]>0.5] = torch.from_numpy(np.array([0, 1, 0])).unsqueeze(1).float()
-    mask[:, scribble[1]>0.5] = torch.from_numpy(np.array([1, 0, 0])).unsqueeze(1).float()
+    # scribble = scribble.cpu()
+    # mask[:, scribble[0]>0.5] = torch.from_numpy(np.array([0, 1, 0])).unsqueeze(1).float()
+    # mask[:, scribble[1]>0.5] = torch.from_numpy(np.array([1, 0, 0])).unsqueeze(1).float()
+    scribble = scribble[0].cpu()
+    mask[:, scribble>0.6] = torch.from_numpy(np.array([0, 1, 0])).unsqueeze(1).float()
+    mask[:, scribble<0.4] = torch.from_numpy(np.array([1, 0, 0])).unsqueeze(1).float()
     return base_transform(detach_to_cpu(mask), size=size)
 
 def pool_pairs(images, size):
     req_images = defaultdict(list)
 
-    b, _, _, _ = images['gt'].shape
+    b, _, _, _ = images['gt_mask'].shape
 
     # Save storage
     b = 2
@@ -123,7 +126,7 @@ def pool_pairs(images, size):
     for b_idx in range(b):
         req_images['RGB'].append(im_transform(images['rgb'][b_idx], size))
         req_images['Mask'].append(mask_transform(images['mask'][b_idx], size))
-        req_images['Scribble'].append(scribble_transform(images['seg'][b_idx], images['srb'][b_idx], size))
-        req_images[GT_name].append(mask_transform(images['gt'][b_idx], size))
+        req_images['Scribble'].append(scribble_transform(images['prev_pred'][b_idx], images['srb'][b_idx], size))
+        req_images[GT_name].append(mask_transform(images['gt_mask'][b_idx], size))
 
     return get_image_array(req_images, size, key_captions)

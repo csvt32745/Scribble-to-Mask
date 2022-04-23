@@ -8,6 +8,7 @@ class HyperParameters():
         # Data parameters
         parser.add_argument('--static_root', help='Static training data root', default='../static')
         parser.add_argument('--lvis_root', help='LVIS data root', default='../lvis')
+        parser.add_argument('--matte_root', help='matte data root', default='../dataset_mat/VideoMatting108')
 
         # Generic learning parameters
         parser.add_argument('-i', '--iterations', help='Total number of iterations', default=80000, type=int)

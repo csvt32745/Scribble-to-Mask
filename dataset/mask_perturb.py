@@ -26,6 +26,10 @@ def random_erode(seg, min=3, max=10):
     seg = cv2.erode(seg,kernel,iterations = 1)
     return seg
 
+def random_blur(inp, min=1, max=3):
+    sig_x, sig_y = np.random.randint(min, max, size=2)
+    return cv2.GaussianBlur(inp, (0, 0), sig_x, sigmaY=sig_y)
+
 def compute_iou(seg, gt):
     intersection = seg*gt
     union = seg+gt
@@ -59,6 +63,9 @@ def perturb_mask(gt, iou_target=0.6):
                 seg[ly:lh, lx:lw] = random_dilate(seg[ly:lh, lx:lw])
             else:
                 seg[ly:lh, lx:lw] = random_erode(seg[ly:lh, lx:lw])
+            
+            # if np.random.rand() < 0.3:
+            #     seg[ly:lh, lx:lw] = random_blur(seg[ly:lh, lx:lw])
 
         if compute_iou(seg, gt) < iou_target:
             break

@@ -1,5 +1,6 @@
 from os import path
 import datetime
+import time
 
 import random
 import math
@@ -10,8 +11,10 @@ import torch.distributed as distributed
 
 from model.model import S2MModel
 from dataset.static_dataset import StaticTransformDataset
-from dataset.lvis import LVIS
-from dataset.lvis_dataset import LVISTransformDataset
+from dataset.vm108_dataset import VM108ImageDataset
+from dataset.d646_dataset import D646ImageDataset
+# from dataset.lvis import LVIS
+# from dataset.lvis_dataset import LVISTransformDataset
 
 from util.logger import TensorboardLogger
 from util.hyper_para import HyperParameters
@@ -82,28 +85,35 @@ def worker_init_fn(worker_id):
 def construct_loader(train_dataset):
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, rank=local_rank, shuffle=True)
     train_loader = DataLoader(train_dataset, para['batch_size'], sampler=train_sampler, num_workers=8,
+    # train_loader = DataLoader(train_dataset, para['batch_size'], num_workers=16,
                             worker_init_fn=worker_init_fn, drop_last=True, pin_memory=True)
     return train_sampler, train_loader
 
 """
 Dataset related
 """
-# Construct dataset
-static_root = path.expanduser(para['static_root'])
-fss_dataset = StaticTransformDataset(path.join(static_root, 'fss'), method=0)
-duts_tr_dataset = StaticTransformDataset(path.join(static_root, 'DUTS-TR'), method=1)
-duts_te_dataset = StaticTransformDataset(path.join(static_root, 'DUTS-TE'), method=1)
-ecssd_dataset = StaticTransformDataset(path.join(static_root, 'ecssd'), method=1)
-big_dataset = StaticTransformDataset(path.join(static_root, 'BIG_small'), method=1)
-hrsod_dataset = StaticTransformDataset(path.join(static_root, 'HRSOD_small'), method=1)
+# # Construct dataset
+# static_root = path.expanduser(para['static_root'])
+# fss_dataset = StaticTransformDataset(path.join(static_root, 'fss'), method=0)
+# duts_tr_dataset = StaticTransformDataset(path.join(static_root, 'DUTS-TR'), method=1)
+# duts_te_dataset = StaticTransformDataset(path.join(static_root, 'DUTS-TE'), method=1)
+# ecssd_dataset = StaticTransformDataset(path.join(static_root, 'ecssd'), method=1)
+# big_dataset = StaticTransformDataset(path.join(static_root, 'BIG_small'), method=1)
+# hrsod_dataset = StaticTransformDataset(path.join(static_root, 'HRSOD_small'), method=1)
 
-static_dataset = ConcatDataset([fss_dataset, duts_tr_dataset, duts_te_dataset, ecssd_dataset] + [big_dataset, hrsod_dataset]*5)
+# static_dataset = ConcatDataset([fss_dataset, duts_tr_dataset, duts_te_dataset, ecssd_dataset] + [big_dataset, hrsod_dataset]*5)
 
-# LVIS
-lvis_root = para['lvis_root']
-LVIS_set = LVIS(path.join(lvis_root, 'lvis_v1_train.json'))
-LVIS_dataset = LVISTransformDataset(path.join(lvis_root, 'train2017'), LVIS_set)
-train_dataset = ConcatDataset([static_dataset]*2 + [LVIS_dataset])
+# # LVIS
+# lvis_root = para['lvis_root']
+# LVIS_set = LVIS(path.join(lvis_root, 'lvis_v1_train.json'))
+# LVIS_dataset = LVISTransformDataset(path.join(lvis_root, 'train2017'), LVIS_set)
+
+# Matte
+# train_dataset = StaticTransformDataset(para['matte_root'])
+vm108_dataset = VM108ImageDataset(para['matte_root'])
+d646_dataset = D646ImageDataset()
+train_dataset = ConcatDataset([vm108_dataset]+[d646_dataset]*2)
+# train_dataset = D646ImageDataset()
 
 train_sampler, train_loader = construct_loader(train_dataset)
 print('Total dataset size: ', len(train_dataset))
@@ -120,11 +130,15 @@ try:
         train_sampler.set_epoch(e)
         # Train loop
         model.train()
+        # start = time.time()
         for data in train_loader:
+            # print("data loader: ", time.time()-start)
             model.do_pass(data, total_iter)
             total_iter += 1
             if total_iter >= para['iterations']:
                 break
+            # start = time.time()
+
 finally:
     if not para['debug'] and model.logger is not None and total_iter>1000:
         model.save(total_iter)

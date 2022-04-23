@@ -11,4 +11,5 @@ def aggregate_wbg_channel(prob, keep_bg=False):
     if keep_bg:
         return logits, F.softmax(logits, dim=1)
     else:
-        return logits, F.softmax(logits, dim=1)[:, 1:]
+        # return logits, F.softmax(logits, dim=1)[:, 1:]
+        return logits[:, 1:], F.softmax(logits, dim=1)[:, 1:]

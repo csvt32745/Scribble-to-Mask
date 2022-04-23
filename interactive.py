@@ -6,8 +6,11 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 import cv2
+import mediapy as media
+from enum import IntEnum, auto
 
-from model.network import deeplabv3plus_resnet50 as S2M
+# from model.network import deeplabv3plus_resnet50 as S2M
+from MODNet.modnet import MODNet as S2M
 from model.aggregate import aggregate_wbg_channel as aggregate
 from dataset.range_transform import im_normalization
 from util.tensor_util import pad_divide_by
@@ -63,12 +66,14 @@ class InteractiveManager:
         # Convert scribbles to tensors
         Rsp = torch.from_numpy(self.p_srb).unsqueeze(0).unsqueeze(0).float().cuda()
         Rsn = torch.from_numpy(self.n_srb).unsqueeze(0).unsqueeze(0).float().cuda()
-        Rs = torch.cat([Rsp, Rsn], 1)
+        # Rs = torch.cat([Rsp, Rsn], 1)
+        Rs = 0.5 + 0.5*Rsp - 0.5*Rsn
         Rs, _ = pad_divide_by(Rs, 16)
 
         # Use the network to do stuff
         inputs = torch.cat([self.image, self.mask, Rs], 1)
-        _, mask = aggregate(torch.sigmoid(net(inputs)))
+        # _, mask = aggregate((net(inputs)))
+        _, mask = aggregate(net(inputs)[2]) # TODO: sigmoid
 
         # We don't overwrite current mask until commit
         self.last_mask = mask
@@ -102,14 +107,18 @@ parser.add_argument('--mask', default=None)
 args = parser.parse_args()
 
 # network stuff
-net = S2M()
+net = S2M(5)
+# net = S2M()
 net.load_state_dict(torch.load(args.model))
 net = net.cuda().eval()
 torch.set_grad_enabled(False)
 
 # Reading stuff
 image = cv2.imread(args.image, cv2.IMREAD_COLOR)
+image = cv2.resize(image, (1024, 1024))
 h, w = image.shape[:2]
+print(h, w)
+
 if args.mask is None:
     mask = np.zeros((h, w), dtype=np.uint8)
 else:
@@ -157,14 +166,21 @@ print('Key r - Clear everything')
 print('Key d - Switch between overlay/mask view')
 print('Key s - Save masks into a temporary output folder (./output/)')
 
-display_comp = True
+class DisplayMode(IntEnum):
+    Comparance = auto()
+    Mask = auto()
+    FG = auto()
+
+display_comp = DisplayMode.Comparance
 while 1:
     if manager.need_update:
         np_mask = manager.run_s2m()
-        if display_comp:
+        if display_comp == DisplayMode.Comparance:
             display = comp_image(image, np_mask, manager.p_srb, manager.n_srb)
-        else:
+        elif display_comp == DisplayMode.Mask:
             display = np_mask
+        else:# display_comp == DisplayMode.FG:
+            display = ((np_mask.reshape(*np_mask.shape, 1)/255.)*image).astype(np.uint8)
         manager.need_update = False
 
     cv2.imshow('S2M demo', display)
@@ -178,7 +194,7 @@ while 1:
         os.makedirs('output', exist_ok=True)
         cv2.imwrite('output/%s' % path.basename(args.mask), mask)
     elif k == ord('d'):
-        display_comp = not display_comp
+        display_comp = (display_comp+1) % DisplayMode.__len__()
         manager.need_update = True
     elif k == ord('r'):
         manager.clean_up()

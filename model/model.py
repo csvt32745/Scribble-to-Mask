@@ -5,8 +5,10 @@ import torch.optim as optim
 import time
 
 from model.network import deeplabv3plus_resnet50
+from MODNet.modnet import MODNet
+
 from model.aggregate import aggregate_wbg_channel as aggregate
-from model.losses import LossComputer, iou_hooks_to_be_used
+from model.losses import MatLossComputer, iou_hooks_to_be_used
 from util.log_integrator import Integrator
 from util.image_saver import pool_pairs
 
@@ -18,9 +20,10 @@ class S2MModel:
 
         self.S2M = nn.parallel.DistributedDataParallel(
             nn.SyncBatchNorm.convert_sync_batchnorm(
-                deeplabv3plus_resnet50(num_classes=1, output_stride=16, pretrained_backbone=False)
+                # deeplabv3plus_resnet50(num_classes=1, output_stride=16, pretrained_backbone=False)
+                MODNet(in_channels=5),
             ).cuda(),
-            device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+            device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=True)
 
         # Setup logger when local_rank=0
         self.logger = logger
@@ -29,7 +32,7 @@ class S2MModel:
             self.last_time = time.time()
         self.train_integrator = Integrator(self.logger, distributed=True, local_rank=local_rank, world_size=world_size)
         self.train_integrator.add_hook(iou_hooks_to_be_used)
-        self.loss_computer = LossComputer(para)
+        self.loss_computer = MatLossComputer(para)
 
         self.train()
         self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.S2M.parameters()), lr=para['lr'], weight_decay=1e-7)
@@ -41,10 +44,18 @@ class S2MModel:
         self.save_model_interval = 20000
         if para['debug']:
             self.report_interval = self.save_im_interval = 1
+        
+        self.lt = 0
+
+    def time_stamp(self, text=""):
+        return
+        print(text,time.time()-self.lt)
+        self.lt = time.time()
 
     def do_pass(self, data, it=0):
         # No need to store the gradient outside training
         torch.set_grad_enabled(self._is_train)
+        self.time_stamp('start')
 
         for k, v in data.items():
             if type(v) != list and type(v) != dict and type(v) != int:
@@ -52,16 +63,29 @@ class S2MModel:
 
         out = {}
         Fs = data['rgb']
-        Ss = data['seg']
+        Ss = data['prev_pred']
         Rs = data['srb']
-        Ms = data['gt']
+        Ms = data['gt_mask']
 
         inputs = torch.cat([Fs, Ss, Rs], 1)
-        prob = torch.sigmoid(self.S2M(inputs))
+        # prob = torch.sigmoid(self.S2M(inputs)) 
+        self.time_stamp('to cuda')
+
+        # prob = self.S2M(inputs) # TODO: sigmoid
+        
+        # mask_semantic, mask_boundary, prob = self.S2M(inputs, inference=True) # TODO: sigmoid
+        mask_semantic, mask_boundary, prob = self.S2M(inputs, inference=False) # TODO: sigmoid
         logits, mask = aggregate(prob)
 
         out['logits'] = logits
         out['mask'] = mask
+
+        # ====== MODNet
+        out['mask_semantic'] = mask_semantic
+        out['mask_boundary'] = mask_boundary
+        # ============
+
+        self.time_stamp('do model')
 
         if self._do_log or self._is_train:
             losses = self.loss_computer.compute({**data, **out}, it)
@@ -89,12 +113,15 @@ class S2MModel:
                 if self.logger is not None:
                     self.save(it)
 
+            self.time_stamp('log')
+
             # Backward pass
             self.optimizer.zero_grad() 
             losses['total_loss'].backward() 
             self.optimizer.step()
             self.scheduler.step()
 
+            self.time_stamp('step')
     def save(self, it):
         if self.save_path is None:
             print('Saving has been disabled.')
@@ -114,7 +141,7 @@ class S2MModel:
 
         os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
         checkpoint_path = self.save_path + '_checkpoint.pth'
-        checkpoint = { 
+        checkpoint = {
             'it': it,
             'network': self.S2M.module.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -134,8 +161,8 @@ class S2MModel:
 
         map_location = 'cuda:%d' % self.local_rank
         self.S2M.module.load_state_dict(network)
-        self.optimizer.load_state_dict(optimizer)
-        self.scheduler.load_state_dict(scheduler)
+        # self.optimizer.load_state_dict(optimizer)
+        # self.scheduler.load_state_dict(scheduler)
 
         print('Model loaded.')
 

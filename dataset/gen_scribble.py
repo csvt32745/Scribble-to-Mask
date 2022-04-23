@@ -82,22 +82,50 @@ def get_thinned_scribble(region):
 
     return scribble
 
-robot = TamedRobot()
-def get_scribble(mask, gt, from_zero):
-    mask = mask > 128
-    gt = gt > 128
+def get_point_scribble(region):
+    region_indices = np.argwhere(region)
+    rd = region.astype(int).sum()//20000
+    num_points = np.random.randint(rd, rd*3+2)
+    # print(region.sum(), num_points)
+    srb = np.zeros_like(region)
+    if num_points < 1:
+        return srb
+    include_idx = np.random.choice(region_indices.shape[0], size=num_points, replace=False)
+    # size = np.random.randint(2, 10)
+    for idx in include_idx:
+        # print(idx)
+        cv2.circle(srb, region_indices[idx][::-1], radius=np.random.randint(2, 8), color=1, thickness=-1)
+    return srb
 
+robot = TamedRobot()
+def get_scribble(mask, gt, from_zero=True):
     if from_zero:
         use_robot = False
     else:
-        if np.random.rand() < 0.75:
+        if np.random.rand() < 0.5:
             use_robot = True
         else:
             use_robot = False
 
+    # mask = mask > 128
+    # gt = gt > 128
+    threshold_jitter = np.random.randint(64, 127)
+    threshold_high = 128+threshold_jitter
+    threshold_low = 128-threshold_jitter
+    gt_t = gt >= threshold_high
+    gt_f = gt <= threshold_low
+    
     # False positive and false negative
-    fp = (mask & ~gt).astype(np.uint8)
-    fn = (~mask & gt).astype(np.uint8)
+    # fp = (mask & ~gt).astype(np.uint8)
+    # fn = (~mask & gt).astype(np.uint8)
+    if from_zero:
+        fp = (gt_f).astype(np.uint8)
+        fn = (gt_t).astype(np.uint8)
+    else:
+        mask_t = mask >= threshold_high
+        mask_f = mask <= threshold_low
+        fp = (mask_t & gt_f).astype(np.uint8)
+        fn = (mask_f & gt_t).astype(np.uint8)
 
     if use_robot:
         # The robot is similar to the DAVIS official one
@@ -125,34 +153,43 @@ def get_scribble(mask, gt, from_zero):
 
                 # Initial pass, pick a scribble type
                 pick = np.random.rand()
-                if pick < 0.33:
+                if pick < 0.25:
                     region_scribble = get_boundary_scribble(region_mask)
-                elif pick < 0.66:
+                elif pick < 0.5:
                     region_scribble = get_thinned_scribble(region_mask)
-                else:
+                elif pick < 0.75:
                     region_scribble = get_curve_scribble(region_mask)
+                else:
+                    region_scribble = get_point_scribble(region_mask)
                 this_scribble = (this_scribble | region_scribble)
                     
                 # Optionally use a second scribble type
                 pick = np.random.rand()
                 if pick < 0.3:
                     pick = np.random.rand()
-                    if pick < 0.33:
+                    if pick < 0.25:
                         region_scribble = get_boundary_scribble(region_mask)
-                    elif pick < 0.66:
+                    elif pick < 0.5:
                         region_scribble = get_thinned_scribble(region_mask)
-                    else:
+                    elif pick < 0.75:
                         region_scribble = get_curve_scribble(region_mask)
+                    else:
+                        region_scribble = get_point_scribble(region_mask)
                     this_scribble = (this_scribble | region_scribble)
 
             scribbles.append(this_scribble)
 
         # Sometimes we just draw scribbles referring only to the GT but not the given mask
         if np.random.rand() < 0.3 or (scribbles[0].sum() == 0 and scribbles[1].sum() == 0):
-            for i, m in enumerate([gt.astype(np.uint8), (~gt).astype(np.uint8)]):
+            pick = np.random.rand()
+            for i, m in enumerate([gt_t.astype(np.uint8), gt_f.astype(np.uint8)]):
+                # for i, m in enumerate([gt.astype(np.uint8), (~gt).astype(np.uint8)]):
                 if m.sum() < 100:
                     continue
-                this_scribble = get_curve_scribble(m, max_srb=5, sort=False)
+                if pick < 0.5:
+                    this_scribble = get_curve_scribble(m, max_srb=5, sort=False)
+                else:
+                    this_scribble = get_point_scribble(m)
                 scribbles[i] = scribbles[i] | this_scribble
 
         return scribbles[0].astype(np.uint8), scribbles[1].astype(np.uint8)
