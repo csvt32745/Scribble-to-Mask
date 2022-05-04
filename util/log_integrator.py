@@ -76,5 +76,6 @@ class Integrator:
                     self.logger.log_metrics(prefix, k, avg, it, f)
             else:
                 # Simple does it
+                # print("!")
                 self.logger.log_metrics(prefix, k, avg, it, f)
 

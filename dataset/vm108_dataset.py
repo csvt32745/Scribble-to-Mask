@@ -9,6 +9,7 @@ import numpy as np
 import cv2
 import json
 import random
+from scipy.ndimage import distance_transform_edt
 
 from dataset.range_transform import im_normalization, im_mean
 from dataset.mask_perturb import perturb_mask
@@ -18,10 +19,10 @@ from dataset.reseed import reseed
 class VM108ImageDataset(Dataset):
     FG_FOLDER = 'FG_done'
     BG_FOLDER = 'BG_done'
-    def __init__(self, root, mode='train'):
+    def __init__(self, root, mode='train', is_3ch_srb=False):
         self.root = root
         assert mode in ['train', 'val']
-        
+        self.is_3ch_srb = is_3ch_srb
         with open(os.path.join(self.root, 'frame_corr.json'), 'r') as f:
             self.frame_corr = json.load(f)
         with open(os.path.join(self.root, f'{mode}_videos.txt'), 'r') as f:
@@ -39,19 +40,20 @@ class VM108ImageDataset(Dataset):
 
         interp_mode = transforms.InterpolationMode.BILINEAR
 
+        # TODO: Original is Affine -> Resize, dont know if the perf is decreased
         self.im_dual_transform = transforms.Compose([
-            transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode, fill=im_mean),
             transforms.Resize(480, interp_mode),
+            transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode, fill=im_mean),
             transforms.RandomCrop((480, 480), pad_if_needed=True, fill=im_mean),
-            transforms.GaussianBlur((5, 5)),
+            transforms.GaussianBlur((13, 13)),
             transforms.RandomHorizontalFlip(),
         ])
 
         self.gt_dual_transform = transforms.Compose([
-            transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode, fill=0),
             transforms.Resize(480, interp_mode),
+            transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode, fill=0),
             transforms.RandomCrop((480, 480), pad_if_needed=True, fill=0),
-            transforms.GaussianBlur((5, 5)),
+            transforms.GaussianBlur((13, 13)),
             transforms.RandomHorizontalFlip(),
         ])
 
@@ -70,10 +72,10 @@ class VM108ImageDataset(Dataset):
         for v in frame_list:
             samples += [k for k in sorted(self.frame_corr.keys()) if os.path.dirname(k) == v.strip()]
         return samples
-
+    
     def __getitem__(self, idx):
         name = self.im_list[idx]
-        dn = os.path.dirname(name)
+        # dn = os.path.dirname(name)
 
         # img I/O
         bgp = path.join(self.root, self.BG_FOLDER, self.frame_corr[name])
@@ -97,30 +99,37 @@ class VM108ImageDataset(Dataset):
         gt = self.gt_dual_transform(Image.fromarray(gt))
         gt_np = np.array(gt)
 
-        if np.random.rand() < 0.5:
-        # if True:
+        #TODO
+        # if np.random.rand() < 0.5:
+        if True:
             # from_zero - no previous mask
             prev_pred = np.zeros_like(gt_np)
             from_zero = True
         else:
-            iou_max = 0.95
-            iou_min = 0.4
+            iou_min = 20
+            iou_max = 40
             iou_target = np.random.rand()*(iou_max-iou_min) + iou_min
             prev_pred = perturb_mask(gt_np, iou_target=iou_target)
             from_zero = False
 
         # Generate scribbles
-        p_srb, n_srb = get_scribble(prev_pred, gt_np, from_zero=from_zero)
+        if self.is_3ch_srb:
+            srbs = get_scribble(prev_pred, gt_np, from_zero=from_zero, is_transition_included=True)
+            # srb_dists = torch.stack([torch.from_numpy(distance_transform_edt(1-x)) for x in srbs], 0).float()/min(srbs[0].shape)
+            srb = torch.stack([torch.from_numpy(x) for x in srbs], 0).float()
+            # srb = torch.zeros((3, *(gt_np.shape)))
+        else:
+            srbs = get_scribble(prev_pred, gt_np, from_zero=from_zero, is_transition_included=False)
+            srb = torch.from_numpy(0.5 + 0.5*srbs[0] - 0.5*srbs[1]).float().unsqueeze(0)
+            # srb = torch.zeros((1, *(gt_np.shape)))
 
         fg = self.final_im_transform(fg)
         bg = self.final_im_transform(bg)
         gt = self.final_gt_transform(gt)
         full_img = fg*gt + bg*(1-gt)
+        fg = -1
+        bg = -1
 
-        # p_srb = torch.from_numpy(p_srb)
-        # n_srb = torch.from_numpy(n_srb)
-        # srb = torch.stack([p_srb, n_srb], 0).float()
-        srb = torch.from_numpy(0.5 + 0.5*p_srb - 0.5*n_srb).float().unsqueeze(0)
         prev_pred = self.final_gt_transform(prev_pred)
 
         info = {}
@@ -134,6 +143,7 @@ class VM108ImageDataset(Dataset):
             'gt_mask': gt,
             'prev_pred': prev_pred,
             'srb': srb,
+            # 'srb_dist': srb_dists,
             'info': info
         }
         return data

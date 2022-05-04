@@ -4,56 +4,56 @@ import torch.nn as nn
 from util.tensor_util import compute_tensor_iu
 import kornia as K
 
-
 def get_iou_hook(values):
     return 'iou/iou', (values['hide_iou/i']+1)/(values['hide_iou/u']+1)
     # return 'iou/iou', (values['pha_l1'])/(values['pha_grad'])
-    
-
 iou_hooks_to_be_used = [
     # lambda val: ('pha/l1', val['pha_l1']),
     # lambda val: ('pha/laplacian', val['pha_laplacian']),
     # lambda val: ('fgr/l1', val['fgr_l1']),
 ]
 
-class BootstrappedCE(nn.Module):
-    def __init__(self, start_warm=10000, end_warm=30000, top_p=0.15):
-        super().__init__()
-
-        self.start_warm = start_warm
-        self.end_warm = end_warm
-        self.top_p = top_p
-
-    def forward(self, input, target, it):
-        if it < self.start_warm:
-            return F.cross_entropy(input, target), 1.0
-
-        raw_loss = F.cross_entropy(input, target, reduction='none').view(-1)
-        num_pixels = raw_loss.numel()
-
-        if it >= self.end_warm:
-            this_p = self.top_p
-        else:
-            this_p = self.top_p + (1-self.top_p)*((self.end_warm-it)/(self.end_warm-self.start_warm))
-        loss, _ = torch.topk(raw_loss, int(num_pixels * this_p), sorted=False)
-        return loss.mean(), this_p
-
 class SegLossComputer:
     def __init__(self, para):
         super().__init__()
         self.para = para
-        self.bce = BootstrappedCE()
+        # self.bce = nn.BCEWithLogitsLoss
+        self.morph_kernel = torch.ones(9, 9).cuda()
+        self.semantic_blur = nn.Sequential(
+            # K.filters.GaussianBlur2d((5, 5), (3, 3)),
+            nn.AvgPool2d((16, 16)),
+        )
+        self.blur = K.filters.GaussianBlur2d((5, 5), (4, 4))
 
     def compute(self, data, it):
+        logit = data['logits']
+        # mask = data['mask']
+        gt_mask = data['gt_mask']
+        srb = data['srb'][:, :2] # no transition region/srb in segmentation task
         losses = {}
-
-        losses['total_loss'], losses['p'] = self.bce(data['logits'], data['cls_gt'], it)
-
-        total_i, total_u = compute_tensor_iu(data['mask']>0.5, data['gt']>0.5)
-        losses['hide_iou/i'] = total_i
-        losses['hide_iou/u'] = total_u
-
+        losses['mask_semantic'] = self.seg_loss(
+            data['mask_semantic'], self.semantic_blur(gt_mask), self.semantic_blur(srb))
+        losses['seg_bce_loss'] = self.seg_loss(logit, gt_mask, srb, is_blur=True)
+        losses['total_loss'] = sum(losses.values())
+        
         return losses
+        
+    def seg_loss(self, mask, gt_mask, srb, is_blur=False):
+        return 0.5*(F.mse_loss(torch.sigmoid(mask), gt_mask) + self._bce_weighted_by_srb(mask, gt_mask, srb, is_blur=is_blur)) # FG & BG only
+
+    def _bce_weighted_by_srb(self, logits, gt, srb, lamb=5, is_blur=False):
+        if srb.size(1) == 1:
+            weight = ((srb > 0.99) | (srb < 0.01)).float()
+            # weight = self.blur(weight)
+        else:
+            weight = torch.sum(srb, dim=1, keepdim=True)
+            # weight = torch.sum(2-srb, dim=1, keepdim=True) # max ~= 1.4
+        
+        if is_blur:
+            weight = self.blur(weight)
+
+        return F.binary_cross_entropy_with_logits(logits, gt, 1+weight*lamb)
+        # return F.binary_cross_entropy_with_logits(logits, gt, 1+self.blur(weight)*lamb)
 
 class MatLossComputer:
     def __init__(self, para):
@@ -61,54 +61,43 @@ class MatLossComputer:
         self.para = para
         # self.bce = nn.BCEWithLogitsLoss
         self.lapla_loss = LapLoss(max_levels=2).cuda()
-        self.morph_kernel = torch.ones(3, 3).cuda()
-        self.blur = nn.Sequential(
+        self.morph_kernel = torch.ones(9, 9).cuda()
+        self.semantic_blur = nn.Sequential(
+            # K.filters.GaussianBlur2d((5, 5), (3, 3)),
             nn.AvgPool2d((16, 16)),
-            K.filters.GaussianBlur2d((5, 5), (1.4, 1.4))
         )
+        self.blur = K.filters.GaussianBlur2d((5, 5), (4, 4))
+        self.spatial_grad = K.filters.SpatialGradient()
 
     def compute(self, data, it):
-        # data:{
-        #   'rgb': input,
-        #   'gt': gt,
-        #   'cls_gt': cls_gt, (number label)
-        #   'seg': seg, # prev seg (with noise)
-        #   'srb': srb, # scribble map
-        #   'info': info # name
-        #   'logits': raw output
-        #   'mask': 0~1
-        # }
-        # 
-        # losses = {}
-
-        # losses['total_loss'], losses['p'] = self.bce(data['logits'], data['cls_gt'], it)
-
-        # total_i, total_u = compute_tensor_iu(data['mask']>0.5, data['gt']>0.5)
-        # losses['hide_iou/i'] = total_i
-        # losses['hide_iou/u'] = total_u
         mask = data['mask']
         gt_mask = data['gt_mask']
-        losses = self.matting_loss(mask, gt_mask, data['fg'], data['bg'], data['rgb'])
+        losses = self.matting_loss(mask, gt_mask)#, data['fg'], data['bg'], data['rgb'])
         if 'mask_semantic' in data:
-            losses.update(self.modnet_loss(data['mask_semantic'], data['mask_boundary'], gt_mask))
+            losses.update(self.modnet_loss(data['mask_semantic'], data['mask_boundary'], gt_mask, data['srb']))
 
-        losses['bce_weight_srb'] = self._bce_weighted_by_srb(data['logits'], gt_mask, data['srb'])
+        # losses['bce_weight_srb'] = self._bce_weighted_by_srb(data['logits'], gt_mask, data['srb'])
         losses['total_loss'] = sum(losses.values())
         
         return losses
         
-    def modnet_loss(self, mask_sem, mask_bound, gt_mask):
+    def modnet_loss(self, mask_sem, mask_bound, gt_mask, srb):
         return {
-            'mask_semantic': self._semantic_loss(mask_sem, gt_mask),
-            'mask_boundary': self._boundary_detail_loss(mask_bound, gt_mask)
+            'mask_semantic': self._semantic_loss(mask_sem, gt_mask, srb),
+            'mask_boundary': self._boundary_detail_loss(mask_bound, gt_mask, srb)
         }
 
-    def _boundary_detail_loss(self, mask, gt_mask):
-        bound_mask = K.morphology.dilation(gt_mask, self.morph_kernel) - K.morphology.erosion(gt_mask, self.morph_kernel)
+    def _boundary_detail_loss(self, mask, gt_mask, srb):
+        # bound_mask = K.morphology.dilation(((gt_mask < 0.99) & (gt_mask > 0.01)).float(), self.morph_kernel)
+        bound_mask = K.morphology.dilation(((gt_mask < 0.99) & (gt_mask > 0.01)).float() + srb[:, 2:], self.morph_kernel)
+        # bound_mask = K.morphology.dilation(gt_mask, self.morph_kernel) - K.morphology.erosion(gt_mask, self.morph_kernel)
         return L1_mask(mask, gt_mask, bound_mask)
 
-    def _semantic_loss(self, mask, gt_mask):
-        return 0.5*F.mse_loss(mask, self.blur(gt_mask))
+    def _semantic_loss(self, mask, gt_mask, srb):
+        gt = self.semantic_blur(gt_mask)
+        srb = self.semantic_blur(srb)
+        # return 0.5*(F.mse_loss(torch.sigmoid(mask), gt))
+        return 0.5*(F.mse_loss(torch.sigmoid(mask), gt) + self._bce_weighted_by_srb(mask, gt, srb[:, :2])) # FG & BG only
 
     def matting_loss(self, pred_pha, true_pha, fg=None, bg=None ,img=None):
         """
@@ -123,18 +112,25 @@ class MatLossComputer:
         # loss['pha_l1'] = F.l1_loss(pred_pha, true_pha)
         loss['pha_l1_l2'] = L1L2_split_loss(pred_pha, true_pha)
         # loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
-        loss['pha_grad'] = F.l1_loss(K.filters.sobel(pred_pha), K.filters.sobel(true_pha))
+        # loss['pha_grad'] = F.l1_loss(K.filters.sobel(pred_pha), K.filters.sobel(true_pha))
 
-        loss['pha_laplacian'] = self.lapla_loss(pred_pha, true_pha)
+        # loss['pha_laplacian'] = self.lapla_loss(pred_pha, true_pha)
         # loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
         #                                    true_pha[:, 1:] - true_pha[:, :-1]) * 5
+
+        pred_grad = self.spatial_grad(pred_pha)
+        true_grad = self.spatial_grad(true_pha)
+        loss['pha_grad'] = F.l1_loss(pred_grad, true_grad)
+        loss['pha_grad_punish'] = 0.001 * torch.abs(pred_grad).mean()
 
         # Foreground losses
         # true_msk = true_pha.gt(0)
         # pred_fgr = pred_fgr * true_msk
         # true_fgr = true_fgr * true_msk
-        composited = fg*pred_pha + bg*(1-pred_pha)
-        loss['fgr_l1'] = F.l1_loss(composited, img)
+        # composited = fg*pred_pha + bg*(1-pred_pha)
+        # loss['fgr_l1'] = F.l1_loss(composited, img)
+
+
         # loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
         #                                    true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
         # Total
@@ -144,10 +140,16 @@ class MatLossComputer:
         # loss['total_loss'] = loss['pha_l1'] + loss['pha_grad']
         return loss
 
-    @staticmethod
-    def _bce_weighted_by_srb(logits, gt, srb, lamb=10):
-        weight = ((srb > 0.99) | (srb < 0.01)).float() * lamb + 1
-        return F.binary_cross_entropy_with_logits(logits, gt, weight)
+    def _bce_weighted_by_srb(self, logits, gt, srb, lamb=5):
+        if srb.size(1) == 1:
+            weight = ((srb > 0.99) | (srb < 0.01)).float()
+            # weight = self.blur(weight)
+        else:
+            weight = torch.sum(srb, dim=1, keepdim=True)
+            # weight = torch.sum(2-srb, dim=1, keepdim=True) # max ~= 1.4
+        
+        # return F.binary_cross_entropy_with_logits(logits, gt, 1+weight*lamb)
+        return F.binary_cross_entropy_with_logits(logits, gt, 1+self.blur(weight)*lamb)
 
 # ----------------------------------------------------------------------------- Laplacian Loss
 

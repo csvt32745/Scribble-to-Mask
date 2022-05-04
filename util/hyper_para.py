@@ -1,10 +1,15 @@
 from argparse import ArgumentParser
-
+import json
 
 class HyperParameters():
     def parse(self, unknown_arg_ok=False):
         parser = ArgumentParser()
-
+        
+        # Method / Network parameters
+        parser.add_argument('--srb_3ch', help='split 3ch of sribble map', action='store_true')
+        parser.add_argument('--backbone', help='backbone from timm', default='mobilenetv2_100')
+        parser.add_argument('--pretrained_backbone', help='Use pretrained backbone from timm', default=False, action='store_true')
+        
         # Data parameters
         parser.add_argument('--static_root', help='Static training data root', default='../static')
         parser.add_argument('--lvis_root', help='LVIS data root', default='../lvis')
@@ -14,6 +19,7 @@ class HyperParameters():
         parser.add_argument('-i', '--iterations', help='Total number of iterations', default=80000, type=int)
         parser.add_argument('--lr', help='Learning rate', default=1e-4, type=float)
         parser.add_argument('--steps', help='Step at which the learning rate decays', nargs="*", default=[], type=int)
+        parser.add_argument('--seg_epoch', help='Pretrain epoch for segmetation', default=5, type=int)
 
         parser.add_argument('-b', '--batch_size', help='Batch size', default=16, type=int)
         parser.add_argument('--gamma', help='Gamma used in learning rate decay', default=0.1, type=float)
@@ -44,3 +50,7 @@ class HyperParameters():
 
     def __str__(self):
         return str(self.args)
+
+    def save(self, savepath):
+        with open(savepath, 'w') as f:
+            json.dump(self.args, f, indent=4) 

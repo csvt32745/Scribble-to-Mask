@@ -8,7 +8,7 @@ from model.network import deeplabv3plus_resnet50
 from MODNet.modnet import MODNet
 
 from model.aggregate import aggregate_wbg_channel as aggregate
-from model.losses import MatLossComputer, iou_hooks_to_be_used
+from model.losses import MatLossComputer, SegLossComputer
 from util.log_integrator import Integrator
 from util.image_saver import pool_pairs
 
@@ -17,23 +17,33 @@ class S2MModel:
     def __init__(self, para, logger=None, save_path=None, local_rank=0, world_size=1):
         self.para = para
         self.local_rank = local_rank
-
-        self.S2M = nn.parallel.DistributedDataParallel(
-            nn.SyncBatchNorm.convert_sync_batchnorm(
-                # deeplabv3plus_resnet50(num_classes=1, output_stride=16, pretrained_backbone=False)
-                MODNet(in_channels=5),
-            ).cuda(),
-            device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=True)
-
+        self.trimap_srb = not self.para['srb_3ch']
+        # self.S2M = nn.parallel.DistributedDataParallel(
+        #     nn.SyncBatchNorm.convert_sync_batchnorm(
+        #         # deeplabv3plus_resnet50(num_classes=1, output_stride=16, pretrained_backbone=False)
+        #         MODNet(in_channels = (5 if self.trimap_srb else 7), backbone_arch=para['backbone'], backbone_pretrained=para['pretrained_backbone']), # 3+1+3 or 3+1+1
+        #         # MODNet(in_channels = (5 if self.trimap_srb else 6)), # 3+1+3 or 3+1+1
+        #     ).cuda(),
+        #     device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, find_unused_parameters=True)
+        self.S2M = MODNet(
+            in_channels = (5 if self.trimap_srb else 7), 
+            backbone_arch=para['backbone'], backbone_pretrained=para['pretrained_backbone']
+            ).cuda() # 3+1+3 or 3+1+1
+        
         # Setup logger when local_rank=0
         self.logger = logger
         self.save_path = save_path
+        
+        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+        self.para.save(os.path.join(os.path.dirname(save_path), 'config.json'))
+
         if logger is not None:
             self.last_time = time.time()
-        self.train_integrator = Integrator(self.logger, distributed=True, local_rank=local_rank, world_size=world_size)
-        self.train_integrator.add_hook(iou_hooks_to_be_used)
-        self.loss_computer = MatLossComputer(para)
-
+        # self.train_integrator = Integrator(self.logger, distributed=True, local_rank=local_rank, world_size=world_size)
+        self.train_integrator = Integrator(self.logger, distributed=False)
+        # self.train_integrator.add_hook(iou_hooks_to_be_used)
+        self.mat_loss_computer = MatLossComputer(para)
+        self.seg_loss_computer = SegLossComputer(para)
         self.train()
         self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.S2M.parameters()), lr=para['lr'], weight_decay=1e-7)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, para['steps'], para['gamma'])
@@ -41,7 +51,7 @@ class S2MModel:
         # Logging info
         self.report_interval = 50
         self.save_im_interval = 800
-        self.save_model_interval = 20000
+        self.save_model_interval = 10000
         if para['debug']:
             self.report_interval = self.save_im_interval = 1
         
@@ -52,43 +62,50 @@ class S2MModel:
         print(text,time.time()-self.lt)
         self.lt = time.time()
 
-    def do_pass(self, data, it=0):
+    def do_pass(self, data, it=0, segmentation_mode=False):
         # No need to store the gradient outside training
         torch.set_grad_enabled(self._is_train)
         self.time_stamp('start')
 
         for k, v in data.items():
-            if type(v) != list and type(v) != dict and type(v) != int:
+            # if type(v) != list and type(v) != dict and type(v) != int:
+            if isinstance(v, torch.Tensor):
                 data[k] = v.cuda(non_blocking=True)
 
         out = {}
         Fs = data['rgb']
         Ss = data['prev_pred']
         Rs = data['srb']
+        # Rs = data['srb_dist']
         Ms = data['gt_mask']
 
+        # inputs = torch.cat([Fs, Rs], 1)
         inputs = torch.cat([Fs, Ss, Rs], 1)
         # prob = torch.sigmoid(self.S2M(inputs)) 
         self.time_stamp('to cuda')
 
         # prob = self.S2M(inputs) # TODO: sigmoid
-        
+        # if segmentation_mode:
+        #     mask_semantic, logits, mask = self.S2M.segmentation_only(inputs) # TODO: sigmoid
+        #     out['logits'] = logits
+        #     out['mask'] = mask
+        #     out['mask_semantic'] = mask_semantic
+        # else:
         # mask_semantic, mask_boundary, prob = self.S2M(inputs, inference=True) # TODO: sigmoid
-        mask_semantic, mask_boundary, prob = self.S2M(inputs, inference=False) # TODO: sigmoid
-        logits, mask = aggregate(prob)
-
+        mask_semantic, mask_boundary, logits, mask = self.S2M(inputs, inference=False) # TODO: sigmoid
+        # logits, mask = aggregate(prob)
         out['logits'] = logits
         out['mask'] = mask
-
         # ====== MODNet
         out['mask_semantic'] = mask_semantic
         out['mask_boundary'] = mask_boundary
-        # ============
 
         self.time_stamp('do model')
 
         if self._do_log or self._is_train:
-            losses = self.loss_computer.compute({**data, **out}, it)
+            # losses = (self.seg_loss_computer if segmentation_mode else self.mat_loss_computer)\
+            losses = self.mat_loss_computer\
+                .compute({**data, **out}, it)
 
             # Logging
             if self._do_log:
@@ -98,7 +115,7 @@ class S2MModel:
                         if self.logger is not None:
                             images = {**data, **out}
                             size = (384, 384)
-                            self.logger.log_cv2('train/pairs', pool_pairs(images, size=size), it)
+                            self.logger.log_cv2('train/pairs', pool_pairs(images, size=size, trimap_srb=self.trimap_srb), it)
 
         if self._is_train:
             if (it) % self.report_interval == 0 and it != 0:
@@ -127,9 +144,10 @@ class S2MModel:
             print('Saving has been disabled.')
             return
         
-        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+        # os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
         model_path = self.save_path + ('_%s.pth' % it)
-        torch.save(self.S2M.module.state_dict(), model_path)
+        # torch.save(self.S2M.module.state_dict(), model_path)
+        torch.save(self.S2M.state_dict(), model_path)
         print('Model saved to %s.' % model_path)
 
         self.save_checkpoint(it)
@@ -143,7 +161,8 @@ class S2MModel:
         checkpoint_path = self.save_path + '_checkpoint.pth'
         checkpoint = {
             'it': it,
-            'network': self.S2M.module.state_dict(),
+            'network': self.S2M.state_dict(),
+            # 'network': self.S2M.module.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict()}
         torch.save(checkpoint, checkpoint_path)
@@ -160,8 +179,9 @@ class S2MModel:
         scheduler = checkpoint['scheduler']
 
         map_location = 'cuda:%d' % self.local_rank
-        self.S2M.module.load_state_dict(network)
-        # self.optimizer.load_state_dict(optimizer)
+        # self.S2M.module.load_state_dict(network)
+        self.S2M.load_state_dict(network)
+        self.optimizer.load_state_dict(optimizer)
         # self.scheduler.load_state_dict(scheduler)
 
         print('Model loaded.')
@@ -170,13 +190,15 @@ class S2MModel:
 
     def load_network(self, path):
         map_location = 'cuda:%d' % self.local_rank
-        self.S2M.module.load_state_dict(torch.load(path, map_location={'cuda:0': map_location}))
+        self.S2M.load_state_dict(torch.load(path, map_location={'cuda:0': map_location}))
+        # self.S2M.module.load_state_dict(torch.load(path, map_location={'cuda:0': map_location}))
         print('Network weight loaded:', path)
 
     def load_deeplab(self, path):
         map_location = 'cuda:%d' % self.local_rank
 
-        cur_dict = self.S2M.module.state_dict()
+        cur_dict = self.S2M.state_dict()
+        # cur_dict = self.S2M.module.state_dict()
         src_dict = torch.load(path, map_location={'cuda:0': map_location})['model_state']
 
         for k in list(src_dict.keys()):
@@ -196,7 +218,8 @@ class S2MModel:
                         nn.init.orthogonal_(pads)
                         src_dict[k] = torch.cat([src_dict[k], pads], 1)
 
-        self.S2M.module.load_state_dict(src_dict)
+        self.S2M.load_state_dict(src_dict)
+        # self.S2M.module.load_state_dict(src_dict)
         print('Network weight loaded:', path)
 
     def train(self):
