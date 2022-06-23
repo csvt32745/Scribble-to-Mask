@@ -7,11 +7,14 @@ from torch.utils.data.dataset import Dataset
 from torchvision import transforms
 from PIL import Image
 from pycocotools.coco import COCO
+import cv2
 
+from dataset.custom_transform import *
 from dataset.range_transform import im_normalization, im_mean
 from dataset.mask_perturb import perturb_mask
 from dataset.gen_scribble import get_scribble
 from dataset.reseed import reseed
+from dataset.mask_perturb import get_random_structure
 
 
 class COCODataset(Dataset):
@@ -21,7 +24,8 @@ class COCODataset(Dataset):
     def __init__(self,
         root_img='../dataset_mat/coco/train2017',
         root_anno='../dataset_mat/coco/annotations/instances_train2017.json',
-        min_mask_ratio = 0.2
+        min_mask_ratio = 0.2,
+        shape=512
     ):
         self.min_mask_ratio = min_mask_ratio
         self.root  = root_img
@@ -33,33 +37,34 @@ class COCODataset(Dataset):
         # print('%d images found in %s' % (len(self.im_list), root))
 
         self.im_lone_transform = transforms.Compose([
-            transforms.ColorJitter(0.1, 0.03, 0.03, 0),
+            transforms.ColorJitter(0.2, 0.05, 0.05, 0.1),
             transforms.RandomGrayscale(0.05),
         ])
-
+        
         interp_mode = transforms.InterpolationMode.BILINEAR
         interp_mode_gt = transforms.InterpolationMode.NEAREST
 
         # TODO: Original is Affine -> Resize, dont know if the perf is decreased
         self.im_dual_transform = transforms.Compose([
-            transforms.Resize(480, interp_mode),
+            transforms.Resize(shape, interp_mode),
             transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode, fill=im_mean),
-            transforms.RandomCrop((480, 480), pad_if_needed=True, fill=im_mean),
+            transforms.RandomCrop((shape, shape), pad_if_needed=True, fill=im_mean),
             # transforms.RandomResizedCrop((480, 480))
             # transforms.GaussianBlur((5, 5)),
             transforms.RandomHorizontalFlip(),
         ])
 
         self.gt_dual_transform = transforms.Compose([
-            transforms.Resize(480, interp_mode_gt),
+            transforms.Resize(shape, interp_mode_gt),
             transforms.RandomAffine(degrees=20, scale=(0.8,1.25), shear=10, interpolation=interp_mode_gt, fill=0),
-            transforms.RandomCrop((480, 480), pad_if_needed=True, fill=0),
+            transforms.RandomCrop((shape, shape), pad_if_needed=True, fill=0),
             # transforms.GaussianBlur((5, 5)),
             transforms.RandomHorizontalFlip(),
         ])
 
         # Final transform without randomness
         self.final_im_transform = transforms.Compose([
+            RandomGaussianNoise(0, (0, 24)),
             transforms.ToTensor(),
             im_normalization,
         ])
@@ -150,7 +155,7 @@ class COCODataset(Dataset):
 
         # Generate scribbles
         # if self.is_3ch_srb:
-        srbs = get_scribble(
+        trimap, srbs = get_scribble(
             prev_pred, gt, from_zero=from_zero, 
             is_transition_included=False,
             is_point_center_only=True,
@@ -159,6 +164,12 @@ class COCODataset(Dataset):
         # print([x.shape for x in srbs])
         # srb_dists = torch.stack([torch.from_numpy(distance_transform_edt(1-x)) for x in srbs], 0).float()/min(srbs[0].shape)
         srb = torch.stack([torch.from_numpy(x) for x in srbs] + [torch.zeros(gt.shape)], 0).float()
+        kernel = get_random_structure(np.random.randint(5, 20))
+        gt_tran = cv2.dilate(gt, kernel) - cv2.erode(gt, kernel) > 0
+        trimap = torch.from_numpy(np.stack(trimap+[gt_tran])).float()
+        # srb = torch.from_numpy(np.stack(srbs, 0)).float()
+        # trimap = torch.from_numpy(np.stack(trimap, 0)).float()
+
         # srb = np.concatenate([srbs, np.zeros_like(srbs[0])], axis=0)
         # srb = torch.zeros((3, *(gt_np.shape)))
 
@@ -177,8 +188,9 @@ class COCODataset(Dataset):
         data = {
             'rgb': im,
             'gt_mask': gt,
-            'prev_pred': prev_pred,
+            'prev_mask': prev_pred,
             'srb': srb,
+            'trimap': trimap,
             # 'srb_dist': srb_dists,
             'info': info
         }

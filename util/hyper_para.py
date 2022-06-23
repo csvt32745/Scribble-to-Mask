@@ -14,13 +14,16 @@ class HyperParameters():
         parser.add_argument('--static_root', help='Static training data root', default='../static')
         parser.add_argument('--lvis_root', help='LVIS data root', default='../lvis')
         parser.add_argument('--matte_root', help='matte data root', default='../dataset_mat/VideoMatting108')
+        parser.add_argument('--d646_cache_size', help='Size of lru_cache of d646 dataset', default=0, type=int)
 
         # Generic learning parameters
+        parser.add_argument('-s', '--start_stage', help='Initial stage of dataset', default=1, type=int)
         parser.add_argument('-i', '--iterations', help='Total number of iterations', default=80000, type=int)
         parser.add_argument('--lr', help='Learning rate', default=1e-4, type=float)
         parser.add_argument('--steps', help='Step at which the learning rate decays', nargs="*", default=[], type=int)
         parser.add_argument('--seg_epoch', help='Pretrain epoch for segmetation', default=5, type=int)
 
+        parser.add_argument('--num_workers', help='num_workers of dataloader', default=16, type=int)
         parser.add_argument('-b', '--batch_size', help='Batch size', default=16, type=int)
         parser.add_argument('--gamma', help='Gamma used in learning rate decay', default=0.1, type=float)
 

@@ -11,8 +11,9 @@ from enum import IntEnum, auto
 from scipy.ndimage import distance_transform_edt
 
 # from model.network import deeplabv3plus_resnet50 as S2M
-from MODNet.modnet import MODNet as S2M
-from MODNet.modnet_orig import MODNet as S2M_old
+from MODNet.modnet_split import MODNet as S2M
+# from MODNet.modnet import MODNet as S2M
+from MODNet.modnet_new import MODNet as S2M_old
 from model.aggregate import aggregate_wbg_channel as aggregate
 from dataset.range_transform import im_normalization
 from util.tensor_util import pad_divide_by
@@ -56,6 +57,9 @@ class InteractiveManager:
         self.srb_default_size = 3
         self.srb_size = self.srb_default_size
 
+        self.need_update = False
+        self.need_draw = False
+
     def mouse_down(self, ex, ey):
         ex = int(ex / self.display_ratio)
         ey = int(ey / self.display_ratio)
@@ -65,7 +69,7 @@ class InteractiveManager:
         self.last_ey = ey
         self.pressed = True
         cv2.circle(self.cur_srb, (ex, ey), radius=self.srb_size, color=(1), thickness=-1)
-        self.need_update = True
+        self.need_draw = True
 
     def mouse_move(self, ex, ey):
         ex = int(ex / self.display_ratio)
@@ -79,10 +83,11 @@ class InteractiveManager:
         cv2.line(self.cur_srb, (self.last_ex, self.last_ey), (ex, ey), (1), thickness=self.srb_size)
         self.last_ex = ex
         self.last_ey = ey
-        self.need_update = True
+        self.need_draw = True
 
     def mouse_up(self):
         self.pressed = False
+        self.need_update = True
 
     def run_s2m(self):
         # Convert scribbles to tensors
@@ -100,12 +105,10 @@ class InteractiveManager:
 
         # Use the network to do stuff
         # inputs = torch.cat([self.image, Rs], 1)
-        inputs = torch.cat([self.image, self.mask, Rs], 1)
+        srb = torch.cat([self.mask, Rs], 1)
+        # srb = torch.cat([self.mask, Rs], 1) if args.old else torch.cat([Rs, self.mask], 1)
         # _, mask = aggregate((net(inputs)))
-        if args.old:
-            _, mask = aggregate(net(inputs)[3]) # TODO: sigmoid
-        else:
-            mask = net(inputs)[3]
+        mask = net(self.image, srb)[3]
 
         # We don't overwrite current mask until commit
         self.last_mask = mask
@@ -186,18 +189,26 @@ parser.add_argument('--pad_size', type=int, default=32)
 parser.add_argument('--img_size', type=int, default=1280)
 parser.add_argument('--display_size', type=int, default=1280)
 parser.add_argument('--old', default=False, action='store_true')
+parser.add_argument('--ASPP', default=False, action='store_true')
 args = parser.parse_args()
 
-if 'AIM-500' in (s := args.image.split('/')):
+s = args.image.split('/')
+if 'AIM-500' in s:
     s[-2] = "mask"
     s[-1] = s[-1][:-3] + "png"
     args.mask = os.path.join('/' if args.image[0]=='/' else '', *s)
     print("Autoload AIM-500 Ground Truth: ", args.mask)
+elif 'D646' in s:
+    s[-2] = "GT"
+    s[-1] = s[-1][:-3] + "png"
+    args.mask = os.path.join('/' if args.image[0]=='/' else '', *s)
+    print("Autoload D646 Ground Truth: ", args.mask)
 
 # network stuff
 # net = S2M(6 if args.srb_3ch else 5)
 if args.old:
-    net = S2M_old(7 if args.srb_3ch else 5)
+    print("load old")
+    net = S2M_old(7 if args.srb_3ch else 5, is_ASPP=args.ASPP, backbone_arch=args.backbone)
 else:
     net = S2M(7 if args.srb_3ch else 5, backbone_arch=args.backbone)
 # net = S2M()
@@ -253,9 +264,15 @@ class DisplayMode(IntEnum):
     FG = auto()
 
 display_comp = DisplayMode.Comparance
+is_updated = True
+np_mask = manager.run_s2m()[..., None]
 while 1:
     if manager.need_update:
         np_mask = manager.run_s2m()[..., None]
+        manager.need_update = False
+        is_updated = True
+    
+    if manager.need_draw or is_updated:
         if display_comp == DisplayMode.Comparance:
             display = comp_image(image, np_mask, manager.p_srb, manager.n_srb, manager.t_srb)
         elif display_comp == DisplayMode.Mask:
@@ -266,8 +283,7 @@ while 1:
             display = (alpha*image + (1-alpha)*new_bg).astype(np.uint8)
             # display = np.stack([distance_transform_edt(1-srb) for srb in [manager.p_srb, manager.n_srb, manager.t_srb]], axis=-1)/manager.norm
             # display = distance_transform_edt(1-manager.n_srb)/manager.norm
-            
-        manager.need_update = False
+        manager.need_draw = is_updated = False
 
     final_display = display.copy()
     cv2.circle(final_display, (manager.last_ex, manager.last_ey), radius=manager.srb_size, color=get_color(manager.positive_mode), thickness=-1)
@@ -304,7 +320,7 @@ while 1:
             manager.srb_size -= 5
         print(f'Scribble size = [ {manager.srb_size} ]')
     elif k == ord('w'):
-        manager.srb_size = manager.srb_default_size
+        manager.srb_size = 1
         print(f'Scribble size = [ {manager.srb_size} ]')
     elif k == 27:
         break

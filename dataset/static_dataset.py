@@ -127,7 +127,7 @@ class StaticTransformDataset(Dataset):
             'rgb': im,
             'gt_mask': gt,
             # 'cls_gt': cls_gt,
-            'prev_pred': prev_pred,
+            'prev_mask': prev_pred,
             'srb': srb,
             'info': info
         }

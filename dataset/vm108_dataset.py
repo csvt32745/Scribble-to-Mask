@@ -141,7 +141,7 @@ class VM108ImageDataset(Dataset):
             'fg': fg,
             'bg': bg,
             'gt_mask': gt,
-            'prev_pred': prev_pred,
+            'prev_mask': prev_pred,
             'srb': srb,
             # 'srb_dist': srb_dists,
             'info': info

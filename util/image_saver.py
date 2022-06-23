@@ -130,7 +130,7 @@ def pool_pairs(images, size, trimap_srb=True):
     for b_idx in range(b):
         req_images['RGB'].append(im_transform(images['rgb'][b_idx], size))
         req_images['Mask'].append(mask_transform(images['mask'][b_idx], size))
-        req_images['Scribble'].append(scribble_transform(images['prev_pred'][b_idx], images['srb'][b_idx], size, trimap_srb))
+        req_images['Scribble'].append(scribble_transform(images['prev_mask'][b_idx], images['srb'][b_idx], size, trimap_srb))
         req_images[GT_name].append(mask_transform(images['gt_mask'][b_idx], size))
 
     return get_image_array(req_images, size, key_captions)

@@ -20,6 +20,13 @@ from dataset.coco_dataset import COCODataset
 from util.logger import TensorboardLogger
 from util.hyper_para import HyperParameters
 
+if __name__ == '__main__':
+    # prevent from deadlock
+    # import multiprocessing
+    # multiprocessing.set_start_method('spawn')
+    import cv2
+    cv2.setNumThreads(0)
+    
 
 """
 Initial setup
@@ -101,7 +108,7 @@ def worker_init_fn(worker_id):
 def construct_loader(train_dataset):
     # train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, rank=local_rank, shuffle=True)
     # train_loader = DataLoader(train_dataset, para['batch_size'], sampler=train_sampler, num_workers=8,
-    train_loader = DataLoader(train_dataset, para['batch_size'], num_workers=16, shuffle=True,
+    train_loader = DataLoader(train_dataset, para['batch_size'], num_workers=para['num_workers'], shuffle=True,
                             drop_last=True, pin_memory=True)
                             # worker_init_fn=worker_init_fn, drop_last=True, pin_memory=True)
     return None, train_loader
@@ -128,12 +135,16 @@ Dataset related
 
 # Matte
 # train_dataset = StaticTransformDataset(para['matte_root'])
-d646_dataset = D646ImageDataset(is_3ch_srb=para['srb_3ch'])
-# vm108_dataset = VM108ImageDataset(para['matte_root'], is_3ch_srb=para['srb_3ch'])
-# train_dataset = ConcatDataset([vm108_dataset]+[d646_dataset])
-train_dataset = d646_dataset
+def construct_dataset_loader_with_stage(stage=1):
+    print("Dataset stage = %d" % stage)
+    d646_dataset = D646ImageDataset(is_3ch_srb=para['srb_3ch'], stage=stage, lru_cache_size=para['d646_cache_size'])
+    # vm108_dataset = VM108ImageDataset(para['matte_root'], is_3ch_srb=para['srb_3ch'])
+    # train_dataset = ConcatDataset([vm108_dataset]+[d646_dataset])
+    train_dataset = d646_dataset
+    return train_dataset, construct_loader(train_dataset)[1]
 
-train_sampler, train_loader = construct_loader(train_dataset)
+train_dataset, train_loader = construct_dataset_loader_with_stage(para['start_stage'])
+
 print('Total dataset size: ', len(train_dataset))
 total_epoch = math.ceil(para['iterations']/len(train_loader))
 if para['seg_epoch'] > 0:
@@ -146,25 +157,34 @@ print('Number of training epochs (the last epoch might not complete): ', total_e
 # Need this to select random bases in different workers
 # np.random.seed(np.random.randint(2**30-1) + local_rank*100)
 
+stage = para['start_stage']
+stage_steps = [100001, 20000]
+# stage_steps = [10000, 15000]
+is_final_stage = len(stage_steps)+1 <= stage
+target_stage_step = 1e9 if is_final_stage else stage_steps[stage-1] 
+total_epoch += len(stage_steps)
 try:
     for e in range(total_epoch): 
+        if total_iter >= para['iterations']:
+            break
         print('Epoch %d/%d' % (e, total_epoch))
         
         # Crucial for randomness! 
         # train_sampler.set_epoch(e)
         # Train loop
         model.train()
+
         if e < para['seg_epoch']:
-            seg_iter = 0
             print('Segmentation Training')
             for data in seg_loader:
                 model.do_pass(data, total_iter, segmentation_mode=True)
                 total_iter += 1
-                seg_iter += 1
-                # if seg_iter >= num_seg_iter or total_iter >= para['iterations']:
                 if total_iter >= para['iterations']:
                     break
         else:
+            if e > 0 and e == para['seg_epoch']:
+                model.make_lr_schedular()
+
             print('Matting Training')
             # start = time.time()
             for data in train_loader:
@@ -172,9 +192,19 @@ try:
                 model.do_pass(data, total_iter)
                 total_iter += 1
                 # start = time.time()
-            if total_iter >= para['iterations']:
-                # last training must be matte
-                break
+                if not is_final_stage and total_iter >= target_stage_step:
+                    stage += 1
+                    train_dataset, train_loader = construct_dataset_loader_with_stage(stage)
+                    model.make_lr_schedular()
+                    if stage == len(stage_steps)+1:
+                        is_final_stage = True
+                    else:
+                        target_stage_step = stage_steps[stage-1]
+                    break
+
+                if total_iter >= para['iterations']:
+                    # last training must be matte
+                    break
 
 finally:
     if not para['debug'] and model.logger is not None and total_iter>1000:

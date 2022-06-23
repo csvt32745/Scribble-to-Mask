@@ -38,7 +38,7 @@ def compute_iou(seg, gt):
 def compute_mae(seg, gt):
     return np.abs(seg-gt).mean()
 
-def perturb_mask(gt, iou_target=0.6):
+def perturb_mask(gt, iou_target=30):
     h, w = gt.shape
     seg = gt.copy()
 

@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import bezier
 from scipy.ndimage import distance_transform_edt
+from torch import randint
 
 from dataset.tamed_robot import TamedRobot
 from dataset.mask_perturb import random_erode, get_random_structure
@@ -120,17 +121,24 @@ def get_center_point(region, max_rad=4, min_rad=2, max_points=-1, min_points=-1)
     cv2.circle(srb, select_index[::-1].tolist(), radius=np.random.randint(min_rad, max_rad), color=1, thickness=-1)
     return srb
 
-def get_region_gt(gt, is_transition_included=False):
+def get_region_gt(gt, is_transition_included=False, tran_size_min=5, tran_size_max=40):
     gt_fg = gt >= 254
     gt_bg = gt <= 1
     if is_transition_included:
-        size = np.random.randint(4, 20)
+        size = np.random.randint(tran_size_min, tran_size_max)
         kernel = get_random_structure(size)
-        gt_tran = cv2.dilate((~(gt_fg|gt_bg)).astype(np.uint8), kernel) > 0
+        # gt_tran = cv2.dilate((~(gt_fg|gt_bg)).astype(np.uint8), kernel) > 0
+        gt_tran = (cv2.dilate(gt, kernel) - cv2.erode(gt, kernel)) > 0
         gt_fg &= ~gt_tran
         gt_bg &= ~gt_tran
         return [gt_fg, gt_bg, gt_tran]
     return [gt_fg, gt_bg]
+
+def get_deform_regions(regions):
+    size = np.random.randint(10, 50)
+    kernel = get_random_structure(size)
+    it = np.random.randint(2, 5)
+    return [cv2.erode(reg.astype(np.uint8), kernel, iterations=it, borderValue=0) > 0 for reg in regions]
 
 def get_region_revision(mask, gt_regions, from_zero=False, is_transition_included=False, is_bg_boundary=False):
     gt_fg, gt_bg= gt_regions[:2]
@@ -187,7 +195,7 @@ def get_params(is_transition_included):
         'point':
         {
             'min_points': 1,
-            'max_points': 5,
+            'max_points': 3,
         }
     }
     
@@ -198,16 +206,17 @@ def get_params(is_transition_included):
             {
                 'thickness': np.random.randint(5, 50),
                 'min_srb': 1,
-                'max_srb': 6,
+                'max_srb': 3,
             },
             'point':
             {
                 'min_points': 1,
-                'max_points': 10,
-                'max_rad': 20,
+                'max_points': 5,
+                'max_rad': 10,
             }
         }
         params.append(tran_param)
+    
     return params
 
 robot = TamedRobot()
@@ -238,7 +247,7 @@ def get_scribble(
         sample_regions = get_region_revision(
             mask, gt_regions, from_zero, is_transition_included, is_bg_boundary=np.random.rand() < 0.5)
 
-    get_point_function = get_center_point if is_point_center_only else get_point_scribble
+    get_point_function = get_center_point if np.random.rand() < .5 or is_point_center_only else get_point_scribble
 
     # Generate scribbles
     if use_robot and not is_predef_regions:
@@ -290,7 +299,7 @@ def get_scribble(
                 scribbles[i] |= get_a_random_scribble(m.astype(np.uint8), params[i])
 
         # return scribbles[0].astype(np.uint8), scribbles[1].astype(np.uint8)
-        return [srb.astype(np.uint8) for srb in scribbles]
+        return gt_regions, [srb.astype(np.uint8) for srb in scribbles]
 
 def get_a_random_scribble(region_mask, param, get_point_function=get_point_scribble):
         # pick a scribble type
